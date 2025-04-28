@@ -69,3 +69,6 @@ The system outputs real-time data including:
         •	Position adjustment due to force (Δx)
         •	Motor PWM value
 
+Result:
+
+[![Impedance Video]](https://youtu.be/ZObZXe1pru0)
