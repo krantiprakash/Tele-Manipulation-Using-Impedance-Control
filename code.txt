@@ -1,0 +1,164 @@
+#include "HX711.h"
+
+// ====== PIN ASSIGNMENTS ======
+const int MOTOR_A_PWM_PIN    = 5;
+const int MOTOR_A_DIR_PIN    = 4;
+const int MOTOR_A_BRK_PIN    = 12;
+const int MOTOR_A_ENCODER_A  = 2;  // INT0
+const int MOTOR_A_ENCODER_B  = 3;  // INT1
+
+const int MOTOR_B_PWM_PIN    = 11;
+const int MOTOR_B_DIR_PIN    = 8;
+const int MOTOR_B_BRK_PIN    = 13;
+const int MOTOR_B_ENCODER_A  = 6;  // must be interrupt-capable
+const int MOTOR_B_ENCODER_B  = 7;
+
+#define LOADCELL_DOUT_PIN 9
+#define LOADCELL_SCK_PIN 10
+HX711 scale;
+
+// ====== PARAMETERS ======
+const long   COUNTS_PER_REV    = 84240;               // encoder counts per 360°
+const float  COUNTS_PER_DEG    = COUNTS_PER_REV / 360.0;
+const int    MOTOR_SPEED       = 200;                 // max PWM
+const int    MIN_PWM           =  50;                 // overcome stiction
+const float  K_impedance       =  50.0;               // virtual stiffness (counts per unit force)
+const float  Kp_position       =   2.0;               // P‐gain for position error
+const float  ANGLE_TOLERANCE   =   2.0;               // degrees
+
+// ====== STATE ======
+volatile long encoderCount_A = 0;
+volatile long encoderCount_B = 0;
+
+float TARGET_ANGLE = 0.0;
+long  targetCounts = 0;
+
+void setup() {
+  Serial.begin(9600);
+  while (!Serial);  // wait for USB serial
+  
+  // Motor A
+  pinMode(MOTOR_A_PWM_PIN,    OUTPUT);
+  pinMode(MOTOR_A_DIR_PIN,    OUTPUT);
+  pinMode(MOTOR_A_BRK_PIN,    OUTPUT);
+  pinMode(MOTOR_A_ENCODER_A,  INPUT_PULLUP);
+  pinMode(MOTOR_A_ENCODER_B,  INPUT_PULLUP);
+  // Motor B
+  pinMode(MOTOR_B_PWM_PIN,    OUTPUT);
+  pinMode(MOTOR_B_DIR_PIN,    OUTPUT);
+  pinMode(MOTOR_B_BRK_PIN,    OUTPUT);
+  pinMode(MOTOR_B_ENCODER_A,  INPUT_PULLUP);
+  pinMode(MOTOR_B_ENCODER_B,  INPUT_PULLUP);
+
+  // Encoder interrupts
+  attachInterrupt(digitalPinToInterrupt(MOTOR_A_ENCODER_A), updateEncoderA, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(MOTOR_A_ENCODER_B), updateEncoderA, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(MOTOR_B_ENCODER_A), updateEncoderB, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(MOTOR_B_ENCODER_B), updateEncoderB, CHANGE);
+
+  // Load cell
+  scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
+  scale.set_scale(433.677);
+  scale.tare();
+
+  Serial.println("Enter target angle (degrees):");
+}
+
+void loop() {
+  digitalWrite(MOTOR_A_BRK_PIN, LOW);
+  digitalWrite(MOTOR_B_BRK_PIN, LOW);
+
+  if (Serial.available()) {
+    TARGET_ANGLE = Serial.parseFloat();
+    if (TARGET_ANGLE > 0.0) {
+      targetCounts = TARGET_ANGLE * COUNTS_PER_DEG;
+      Serial.print("→ Impedance‐controlled move to ");
+      Serial.print(TARGET_ANGLE);
+      Serial.println("°");
+      moveWithImpedanceControl();
+      Serial.println("Enter next target angle:");
+    } else {
+      Serial.println("Invalid angle—enter > 0");
+    }
+  }
+}
+
+void moveWithImpedanceControl() {
+  float desiredAngle = TARGET_ANGLE;
+  float x_target     = desiredAngle;  // dynamic target
+  float x_meas, delta_x, forceVal, error;
+  long  count_target;
+  
+  // ----- FORWARD WITH IMPEDANCE -----
+  Serial.println("Forward (impedance)...");
+  while (true) {
+    x_meas   = encoderCount_A / COUNTS_PER_DEG;
+    forceVal = scale.get_units(5);           // read force
+    delta_x  = - forceVal / K_impedance;     // virtual spring: F = -K·Δx
+    x_target = desiredAngle + delta_x;       
+    error    = x_target - x_meas;
+    
+    // check arrival at nominal target
+    if (abs(x_meas - desiredAngle) < ANGLE_TOLERANCE) break;
+    
+    // compute drive PWM
+    int pwm = abs(error) * Kp_position;
+    pwm = constrain(pwm, MIN_PWM, MOTOR_SPEED);
+    bool dir = (error > 0);  // true => forward
+    
+    digitalWrite(MOTOR_A_DIR_PIN, dir ? LOW : HIGH);
+    digitalWrite(MOTOR_B_DIR_PIN, dir ? LOW : HIGH);
+    analogWrite(MOTOR_A_PWM_PIN, pwm);
+    analogWrite(MOTOR_B_PWM_PIN, pwm);
+    
+    Serial.print("Angle:"); Serial.print(x_meas);
+    Serial.print("  F:"); Serial.print(forceVal);
+    Serial.print("  Δx:"); Serial.print(delta_x);
+    Serial.print("  PWM:"); Serial.println(pwm);
+    
+    delay(20);
+  }
+  analogWrite(MOTOR_A_PWM_PIN, 0);
+  analogWrite(MOTOR_B_PWM_PIN, 0);
+  delay(300);
+
+  Serial.println("Reached target—reversing home...");
+
+  // ----- REVERSE BACK HOME -----
+  while (encoderCount_A < 0) {
+    digitalWrite(MOTOR_A_DIR_PIN, HIGH);
+    digitalWrite(MOTOR_B_DIR_PIN, HIGH);
+    analogWrite(MOTOR_A_PWM_PIN, MOTOR_SPEED);
+    analogWrite(MOTOR_B_PWM_PIN, MOTOR_SPEED);
+    Serial.print("Returning—EncA="); Serial.println(encoderCount_A);
+    delay(20);
+  }
+  analogWrite(MOTOR_A_PWM_PIN, 0);
+  analogWrite(MOTOR_B_PWM_PIN, 0);
+
+  // reset
+  encoderCount_A = 0;
+  encoderCount_B = 0;
+  Serial.println("Home reached.");
+  delay(300);
+}
+
+// ==== Encoder ISR A ====
+void updateEncoderA() {
+  static uint8_t lastA=0, lastB=0;
+  uint8_t A = digitalRead(MOTOR_A_ENCODER_A);
+  uint8_t B = digitalRead(MOTOR_A_ENCODER_B);
+  if (A ^ lastA) encoderCount_A += (A==B ? +1 : -1);
+  else if (B ^ lastB) encoderCount_A += (B!=A ? +1 : -1);
+  lastA=A; lastB=B;
+}
+
+// ==== Encoder ISR B ====
+void updateEncoderB() {
+  static uint8_t lastA=0, lastB=0;
+  uint8_t A = digitalRead(MOTOR_B_ENCODER_A);
+  uint8_t B = digitalRead(MOTOR_B_ENCODER_B);
+  if (A ^ lastA) encoderCount_B += (A==B ? +1 : -1);
+  else if (B ^ lastB) encoderCount_B += (B!=A ? +1 : -1);
+  lastA=A; lastB=B;
+}
