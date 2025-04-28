@@ -71,4 +71,4 @@ The system outputs real-time data including:
 
 Result:
 
-[![Impedance Video]](https://youtu.be/ZObZXe1pru0)
+[Impedance Video](https://youtu.be/ZObZXe1pru0)
