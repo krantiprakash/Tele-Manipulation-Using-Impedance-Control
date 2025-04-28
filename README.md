@@ -31,6 +31,7 @@ This Arduino project implements an impedance-controlled dual motor system with f
     •	Encoder B: Pin 7
 
 **Load Cell (HX711)**
+
     •	DOUT: Pin 9
     •	SCK: Pin 10
     
