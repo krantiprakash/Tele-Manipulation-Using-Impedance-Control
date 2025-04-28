@@ -63,7 +63,10 @@ This Arduino project implements an impedance-controlled dual motor system with f
 
 The system outputs real-time data including:
         •	Current angle
+        
         •	Measured force
+        
         •	Position adjustment due to force (Δx)
+        
         •	Motor PWM value
 
